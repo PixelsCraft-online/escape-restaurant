@@ -6,7 +6,7 @@ A fully featured, real-time comprehensive restaurant ordering and management sys
 - **Customer Menu** (`/menu?table=N`): QR-code based ordering, real-time category updates, slide-up cart, and live order tracking.
 - **Kitchen Panel** (`/kitchen`): Real-time order queue with audio notifications, item-level status updates (Done, Skip, Out of Stock), and tick timers.
 - **Counter Panel** (`/counter`): Central billing station, active order monitoring, discount application, and bill generation (with 5% GST calculation).
-- **Admin Dashboard** (`/admin`): PIN-protected (PIN: `escape2024`) analytics displaying live revenue, order volume, charts, and instant menu availability toggling.
+- **Admin Dashboard** (`/admin`): PIN-protected (PIN: ``) analytics displaying live revenue, order volume, charts, and instant menu availability toggling.
 
 ## Tech Stack
 - **Frontend**: React (Vite), Tailwind CSS v3, Recharts
