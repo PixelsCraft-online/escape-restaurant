@@ -1,0 +1,126 @@
+// This is your Prisma schema file
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Table {
+  id          Int          @id @default(autoincrement())
+  tableNumber Int          @unique
+  qrCode      String?
+  isOccupied  Boolean      @default(false)
+  orders      Order[]
+  bills       Bill[]
+  waiterCalls WaiterCall[]
+}
+
+enum Category {
+  STARTER
+  MAIN_VEG
+  MAIN_NONVEG
+  BREAD_RICE
+  DESSERT
+  BEVERAGE
+}
+
+model MenuItem {
+  id          Int         @id @default(autoincrement())
+  name        String
+  category    Category
+  price       Float
+  isVeg       Boolean
+  isAvailable Boolean     @default(true)
+  imageUrl    String?
+  prepTime    Int?        // Estimated prep time in minutes
+  isSpecial   Boolean     @default(false) // Chef's special
+  orderItems  OrderItem[]
+}
+
+enum OrderStatus {
+  PENDING
+  IN_PROGRESS
+  PARTIALLY_READY
+  COMPLETED
+  BILLED
+}
+
+model Order {
+  id        Int         @id @default(autoincrement())
+  tableId   Int
+  table     Table       @relation(fields: [tableId], references: [id])
+  status    OrderStatus @default(PENDING)
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  items     OrderItem[]
+  bill      Bill?
+}
+
+enum ItemStatus {
+  PENDING
+  PREPARING
+  DONE
+  OUT_OF_STOCK
+  SKIPPED
+}
+
+model OrderItem {
+  id           Int        @id @default(autoincrement())
+  orderId      Int
+  order        Order      @relation(fields: [orderId], references: [id])
+  menuItemId   Int
+  menuItem     MenuItem   @relation(fields: [menuItemId], references: [id])
+  quantity     Int
+  itemStatus   ItemStatus @default(PENDING)
+  price        Float
+  instructions String?    // Special instructions like "less spicy", "no onion"
+}
+
+model Bill {
+  id        Int       @id @default(autoincrement())
+  orderId   Int       @unique
+  order     Order     @relation(fields: [orderId], references: [id])
+  tableId   Int
+  table     Table     @relation(fields: [tableId], references: [id])
+  subtotal  Float
+  tax       Float
+  discount  Float     @default(0)
+  total     Float
+  isPaid    Boolean   @default(false)
+  paidAt    DateTime?
+  createdAt DateTime  @default(now())
+  feedback  Feedback?
+}
+
+// Customer feedback after payment
+model Feedback {
+  id        Int      @id @default(autoincrement())
+  billId    Int      @unique
+  bill      Bill     @relation(fields: [billId], references: [id])
+  rating    Int      // 1-5 stars
+  comment   String?
+  createdAt DateTime @default(now())
+}
+
+// Waiter call requests
+model WaiterCall {
+  id          Int       @id @default(autoincrement())
+  tableId     Int
+  table       Table     @relation(fields: [tableId], references: [id])
+  isAttended  Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+  attendedAt  DateTime?
+}
+
+// Secure table session tokens
+model TableSession {
+  id          Int      @id @default(autoincrement())
+  tableNumber Int
+  token       String   @unique
+  createdAt   DateTime @default(now())
+  expiresAt   DateTime
+  isActive    Boolean  @default(true)
+}

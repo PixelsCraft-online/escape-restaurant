@@ -1,0 +1,21 @@
+{
+  "name": "escape-restaurant",
+  "version": "1.0.0",
+  "description": "Escape Restaurant - Full Stack Management System",
+  "scripts": {
+    "dev": "concurrently \"npm run server\" \"npm run client\"",
+    "server": "cd server && npm run dev",
+    "client": "cd client && npm run dev",
+    "install:all": "npm install && cd server && npm install && cd ../client && npm install",
+    "prisma:migrate": "cd server && npx prisma migrate dev",
+    "prisma:seed": "cd server && node prisma/seed.js",
+    "generate:qr": "node scripts/generateQR.js"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  },
+  "dependencies": {
+    "dotenv": "^17.4.0",
+    "qrcode": "^1.5.4"
+  }
+}
