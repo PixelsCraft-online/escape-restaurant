@@ -31,11 +31,11 @@ npm run install:all
 ### 3. Environment Setup
 Configure your database and redis connection strings in `escape-restaurant/.env`:
 ```env
-DATABASE_URL="postgresql://user:password@localhost:5432/escape_restaurant"
-REDIS_URL="redis://localhost:6379"
+DATABASE_URL=
+REDIS_URL=
 PORT=5000
-ADMIN_PIN=escape2024
-CLIENT_URL=http://localhost:5173
+ADMIN_PIN=
+CLIENT_URL=
 ```
 *(Copy the template from `.env.example`)*
 
