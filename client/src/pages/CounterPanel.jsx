@@ -38,7 +38,7 @@ const CounterPanel = () => {
 
   const handleLogin = (e) => {
     e.preventDefault();
-    if (pin === 'escape2024') setIsAuthenticated(true);
+    if (pin === import.meta.env.VITE_ADMIN_PIN) setIsAuthenticated(true);
     else alert('Invalid PIN');
   };
 

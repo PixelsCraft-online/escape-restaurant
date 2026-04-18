@@ -1,16 +1,11 @@
 const express = require('express');
 const router = express.Router();
 
-// GET /api/menu — Returns all available menu items (Redis cached, 5 min TTL)
+// GET /api/menu — Returns all available menu items (DB query directly)
 router.get('/', async (req, res) => {
-  const { prisma, redis } = req;
+  const { prisma } = req;
   try {
-    const cached = await redis.get('menu:all').catch(() => null);
-    if (cached) {
-      return res.json({ source: 'cache', items: JSON.parse(cached) });
-    }
     const items = await prisma.menuItem.findMany({ orderBy: { category: 'asc' } });
-    await redis.setex('menu:all', 300, JSON.stringify(items)).catch(() => {});
     res.json({ source: 'db', items });
   } catch (err) {
     console.error(err);

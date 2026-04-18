@@ -25,7 +25,7 @@ router.get('/analytics', adminAuth, async (req, res) => {
     ]);
 
     const totalRevenue = paidBills.reduce((sum, b) => sum + b.total, 0);
-    const avgOrderValue = totalOrders > 0 ? totalRevenue / paidBills.length : 0;
+    const avgOrderValue = paidBills.length > 0 ? totalRevenue / paidBills.length : 0;
     const tablesOccupied = tables.filter((t) => t.isOccupied).length;
 
     // Hourly order volume (0-23)
@@ -165,7 +165,7 @@ router.get('/export', adminAuth, async (req, res) => {
 
 // PATCH /api/admin/menu/:id — Toggle item availability
 router.patch('/menu/:id', adminAuth, async (req, res) => {
-  const { prisma, redis, io } = req;
+  const { prisma, io } = req;
   const id = parseInt(req.params.id);
   const { isAvailable } = req.body;
 
@@ -174,13 +174,6 @@ router.patch('/menu/:id', adminAuth, async (req, res) => {
       where: { id },
       data: { isAvailable },
     });
-
-    // Invalidate menu cache
-    await redis.del('menu:all').catch(() => {});
-
-    // Reload cache
-    const items = await prisma.menuItem.findMany({ orderBy: { category: 'asc' } });
-    await redis.setex('menu:all', 300, JSON.stringify(items)).catch(() => {});
 
     // Broadcast to all panels
     io.emit('menu_item_toggled', { menuItemId: id, isAvailable });
@@ -196,7 +189,7 @@ router.patch('/menu/:id', adminAuth, async (req, res) => {
 
 // POST /api/admin/menu — Create a new menu item
 router.post('/menu', adminAuth, async (req, res) => {
-  const { prisma, redis, io } = req;
+  const { prisma, io } = req;
   const { name, category, price, isVeg, imageUrl, prepTime, isSpecial } = req.body;
 
   if (!name || !category || price === undefined) {
@@ -217,9 +210,6 @@ router.post('/menu', adminAuth, async (req, res) => {
       }
     });
 
-    // Invalidate menu cache
-    await redis.del('menu:all').catch(() => {});
-    
     // Broadcast menu update
     io.emit('menu_updated', { action: 'created', item });
 
@@ -232,7 +222,7 @@ router.post('/menu', adminAuth, async (req, res) => {
 
 // PUT /api/admin/menu/:id — Update a menu item
 router.put('/menu/:id', adminAuth, async (req, res) => {
-  const { prisma, redis, io } = req;
+  const { prisma, io } = req;
   const id = parseInt(req.params.id);
   const { name, category, price, isVeg, imageUrl, prepTime, isSpecial, isAvailable } = req.body;
 
@@ -251,9 +241,6 @@ router.put('/menu/:id', adminAuth, async (req, res) => {
       }
     });
 
-    // Invalidate menu cache
-    await redis.del('menu:all').catch(() => {});
-
     // Broadcast menu update
     io.emit('menu_updated', { action: 'updated', item });
 
@@ -266,7 +253,7 @@ router.put('/menu/:id', adminAuth, async (req, res) => {
 
 // DELETE /api/admin/menu/:id — Delete a menu item
 router.delete('/menu/:id', adminAuth, async (req, res) => {
-  const { prisma, redis, io } = req;
+  const { prisma, io } = req;
   const id = parseInt(req.params.id);
 
   try {
@@ -282,7 +269,6 @@ router.delete('/menu/:id', adminAuth, async (req, res) => {
         data: { isAvailable: false }
       });
       
-      await redis.del('menu:all').catch(() => {});
       io.emit('menu_updated', { action: 'disabled', item });
       
       return res.json({ message: 'Item has order history, marked as unavailable instead', item });
@@ -291,7 +277,6 @@ router.delete('/menu/:id', adminAuth, async (req, res) => {
     // Hard delete if no orders
     await prisma.menuItem.delete({ where: { id } });
     
-    await redis.del('menu:all').catch(() => {});
     io.emit('menu_updated', { action: 'deleted', menuItemId: id });
 
     res.json({ success: true, message: 'Item deleted successfully' });

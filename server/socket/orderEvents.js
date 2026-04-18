@@ -1,4 +1,4 @@
-function registerSocketEvents(io, prisma, redis) {
+function registerSocketEvents(io, prisma) {
   io.on('connection', (socket) => {
     console.log('🔌 Client connected:', socket.id);
     socket.data.isAdmin = false;
@@ -255,9 +255,6 @@ function registerSocketEvents(io, prisma, redis) {
       if (!socket.data.isAdmin) return socket.emit('error', { message: 'Unauthorized' });
       try {
         await prisma.menuItem.update({ where: { id: menuItemId }, data: { isAvailable } });
-        await redis.del('menu:all').catch(() => {});
-        const items = await prisma.menuItem.findMany({ orderBy: { category: 'asc' } });
-        await redis.setex('menu:all', 300, JSON.stringify(items)).catch(() => {});
         io.emit('menu_item_toggled', { menuItemId, isAvailable });
       } catch (err) {
         console.error('toggle_menu_item error:', err);

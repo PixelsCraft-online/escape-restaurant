@@ -54,12 +54,13 @@ const AdminDashboard = () => {
     endDate: new Date().toISOString().split('T')[0]
   });
 
-  const authHeaders = { 'x-admin-pin': 'escape2024' };
+  const ADMIN_PIN = import.meta.env.VITE_ADMIN_PIN;
+  const authHeaders = { 'x-admin-pin': ADMIN_PIN };
 
   // Auth
   const handleLogin = (e) => {
     e.preventDefault();
-    if (pin === 'escape2024') {
+    if (pin === ADMIN_PIN) {
       setIsAuthenticated(true);
     } else {
       alert('Invalid PIN');
@@ -226,9 +227,9 @@ const AdminDashboard = () => {
   // Export
   const downloadReport = (isRange = false) => {
     if (isRange) {
-      window.location.href = `/api/admin/export/range?startDate=${dateRange.startDate}&endDate=${dateRange.endDate}&pin=escape2024`;
+      window.location.href = `/api/admin/export/range?startDate=${dateRange.startDate}&endDate=${dateRange.endDate}&pin=${ADMIN_PIN}`;
     } else {
-      window.location.href = '/api/admin/export?pin=escape2024';
+      window.location.href = `/api/admin/export?pin=${ADMIN_PIN}`;
     }
   };
 
@@ -337,7 +338,7 @@ const AdminDashboard = () => {
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                   <KPICard title="Today's Revenue" value={`₹${data.totalRevenue.toLocaleString('en-IN')}`} color="orange" />
                   <KPICard title="Total Orders" value={data.totalOrders} color="blue" />
-                  <KPICard title="Avg. Order Value" value={`₹${data.avgOrderValue.toFixed(0)}`} color="green" />
+                  <KPICard title="Avg. Order Value" value={`₹${(data.avgOrderValue ?? 0).toFixed(0)}`} color="green" />
                   <KPICard title="Tables Occupied" value={`${data.tablesOccupied}/${data.totalTables}`} color="purple" />
                 </div>
 
@@ -819,7 +820,7 @@ const AdminDashboard = () => {
                 <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
                   <KPICard title="Total Revenue" value={`₹${rangeAnalytics.totalRevenue.toLocaleString('en-IN')}`} color="orange" />
                   <KPICard title="Total Orders" value={rangeAnalytics.totalOrders} color="blue" />
-                  <KPICard title="Avg. Order Value" value={`₹${rangeAnalytics.avgOrderValue.toFixed(0)}`} color="green" />
+                  <KPICard title="Avg. Order Value" value={`₹${(rangeAnalytics.avgOrderValue ?? 0).toFixed(0)}`} color="green" />
                   <KPICard title="Peak Hour" value={rangeAnalytics.peakHour} color="purple" />
                 </div>
 

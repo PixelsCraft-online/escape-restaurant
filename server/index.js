@@ -5,7 +5,6 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
-const Redis = require('ioredis');
 const { PrismaClient } = require('@prisma/client');
 
 const menuRoutes = require('./routes/menu');
@@ -19,15 +18,6 @@ const registerSocketEvents = require('./socket/orderEvents');
 const app = express();
 const server = http.createServer(app);
 const prisma = new PrismaClient();
-
-// Redis client with reduced retries for dev
-const redis = new Redis(process.env.REDIS_URL || 'redis://localhost:6379', {
-  maxRetriesPerRequest: 1,
-  retryStrategy: () => null, // Don't retry - just fail fast if Redis unavailable
-  lazyConnect: true,
-});
-redis.on('connect', () => console.log('✅ Redis connected'));
-redis.on('error', () => {}); // Silently ignore Redis errors
 
 // Socket.io
 const io = new Server(server, {
@@ -54,10 +44,9 @@ const apiLimiter = rateLimit({
 // Apply rate limiter to all API routes
 app.use('/api', apiLimiter);
 
-// Attach prisma, redis, io to request
+// Attach prisma, io to request
 app.use((req, res, next) => {
   req.prisma = prisma;
-  req.redis = redis;
   req.io = io;
   next();
 });
@@ -76,26 +65,9 @@ app.get('/health', (req, res) => {
 });
 
 // Socket.io events
-registerSocketEvents(io, prisma, redis);
-
-// Warm up menu cache on startup
-async function warmMenuCache() {
-  try {
-    const cached = await redis.get('menu:all');
-    if (!cached) {
-      const items = await prisma.menuItem.findMany({ where: { isAvailable: true } });
-      await redis.setex('menu:all', 300, JSON.stringify(items));
-      console.log('✅ Menu cache warmed');
-    } else {
-      console.log('✅ Menu already cached');
-    }
-  } catch (err) {
-    console.log('⚠️ Menu cache warm-up skipped:', err.message);
-  }
-}
+registerSocketEvents(io, prisma);
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, async () => {
+server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
-  await warmMenuCache();
 });
