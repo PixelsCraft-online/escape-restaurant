@@ -30,6 +30,7 @@ const CounterPanel = () => {
   const [discount, setDiscount] = useState({ amount: '', type: 'flat' });
   const [includeGST, setIncludeGST] = useState(false);
   const [billRequests, setBillRequests] = useState([]);
+  const [waiterCalls, setWaiterCalls] = useState([]);
   const [settledOrders, setSettledOrders] = useState({}); // Track settled orders { orderId: true }
   const [printingBill, setPrintingBill] = useState(null); // Order being printed
   const [processingBill, setProcessingBill] = useState(false);
@@ -62,9 +63,14 @@ const CounterPanel = () => {
   useEffect(() => {
     if (!socket) return;
     
-    socket.on('new_order', (order) => setOrders(prev => [...prev, order]));
+    socket.on('new_order', (order) => {
+      setOrders(prev => prev.some(o => o.id === order.id) ? prev : [...prev, order]);
+    });
     socket.on('order_updated', (order) => {
-      setOrders(prev => prev.map(o => o.id === order.id ? order : o));
+      setOrders(prev => {
+        const exists = prev.some(o => o.id === order.id);
+        return exists ? prev.map(o => o.id === order.id ? order : o) : [...prev, order];
+      });
       if (selectedOrder?.id === order.id) setSelectedOrder(order);
     });
     socket.on('item_status_update', ({ orderItem }) => {
@@ -85,6 +91,12 @@ const CounterPanel = () => {
     socket.on('bill_requested', (req) => {
       setBillRequests(prev => prev.some(r => r.tableNumber === req.tableNumber) ? prev : [...prev, req]);
     });
+    socket.on('waiter_called', (call) => {
+      setWaiterCalls(prev => prev.some(c => c.id === call.id) ? prev : [...prev, call]);
+    });
+    socket.on('waiter_call_handled', ({ callId }) => {
+      setWaiterCalls(prev => prev.filter(c => c.id !== callId));
+    });
 
     return () => {
       socket.off('new_order');
@@ -93,8 +105,25 @@ const CounterPanel = () => {
       socket.off('order_completed');
       socket.off('bill_generated');
       socket.off('bill_requested');
+      socket.off('waiter_called');
+      socket.off('waiter_call_handled');
     };
   }, [socket, selectedOrder]);
+
+  const acknowledgeWaiterCall = (call) => {
+    if (!socket) return;
+
+    socket.emit('acknowledge_waiter_call', {
+      callId: call.id,
+      tableNumber: call.tableNumber,
+    }, (ack) => {
+      if (ack?.ok) {
+        setWaiterCalls(prev => prev.filter(c => c.id !== call.id));
+      } else {
+        alert(ack?.error || 'Failed to acknowledge waiter call.');
+      }
+    });
+  };
 
   // Settle Bill - Mark as paid and restart table session
   const handleSettleBill = async (order) => {
@@ -114,7 +143,7 @@ const CounterPanel = () => {
         orderId: order.id, 
         discount: discountAmt, 
         discountType: 'flat',
-        gst: gst
+        includeGST
       }, { headers: { 'x-admin-pin': pin } });
       
       await axios.patch(`/api/bills/${billRes.data.id}/pay`, {}, { headers: { 'x-admin-pin': pin } });
@@ -373,6 +402,50 @@ const CounterPanel = () => {
                       whileTap={{ scale: 0.95 }}
                     >
                       Select
+                    </motion.button>
+                  </motion.div>
+                ))}
+              </div>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Waiter Calls Banner */}
+      <AnimatePresence>
+        {waiterCalls.length > 0 && (
+          <motion.div
+            className="bg-gradient-to-r from-cyan-500/10 via-teal-500/5 to-cyan-500/10 border-b border-cyan-500/20 px-6 py-4"
+            initial={{ opacity: 0, height: 0 }}
+            animate={{ opacity: 1, height: 'auto' }}
+            exit={{ opacity: 0, height: 0 }}
+          >
+            <div className="flex items-center gap-4 max-w-[1920px] mx-auto">
+              <div className="flex items-center gap-2 text-cyan-400 font-bold">
+                <motion.span
+                  className="w-3 h-3 rounded-full bg-cyan-400"
+                  animate={{ scale: [1, 1.2, 1], opacity: [1, 0.7, 1] }}
+                  transition={{ duration: 1.5, repeat: Infinity }}
+                />
+                Waiter Calls
+              </div>
+              <div className="flex gap-2 flex-wrap">
+                {waiterCalls.map((call) => (
+                  <motion.div
+                    key={call.id}
+                    className="flex items-center gap-2 bg-cyan-500/20 border border-cyan-500/30 px-4 py-2 rounded-xl"
+                    initial={{ opacity: 0, scale: 0.8 }}
+                    animate={{ opacity: 1, scale: 1 }}
+                  >
+                    <span className="text-cyan-300 font-bold">Table {call.tableNumber}</span>
+                    <motion.button
+                      type="button"
+                      onClick={() => acknowledgeWaiterCall(call)}
+                      className="bg-cyan-500 hover:bg-cyan-400 text-slate-900 font-bold px-3 py-1 rounded-lg text-sm transition-all"
+                      whileHover={{ scale: 1.05 }}
+                      whileTap={{ scale: 0.95 }}
+                    >
+                      Acknowledge
                     </motion.button>
                   </motion.div>
                 ))}

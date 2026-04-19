@@ -15,6 +15,8 @@ const CATEGORIES = [
   { id: 'BEVERAGE', label: 'Drinks' }
 ];
 
+const REQUEST_TIMEOUT_MS = 10000;
+
 const CustomerMenu = () => {
   const [searchParams] = useSearchParams();
   const urlToken = searchParams.get('token');
@@ -53,7 +55,9 @@ const CustomerMenu = () => {
         if (tokenToValidate) {
           // Validate existing token
           try {
-            const res = await axios.get(`/api/session/validate/${tokenToValidate}`);
+            const res = await axios.get(`/api/session/validate/${tokenToValidate}`, {
+              timeout: REQUEST_TIMEOUT_MS,
+            });
             if (res.data.valid) {
               setSessionToken(tokenToValidate);
               setTableNumber(res.data.tableNumber);
@@ -83,6 +87,8 @@ const CustomerMenu = () => {
         if (tableNum) {
           const res = await axios.post('/api/session/start', {
             tableNumber: parseInt(tableNum)
+          }, {
+            timeout: REQUEST_TIMEOUT_MS,
           });
           
           setSessionToken(res.data.token);
@@ -135,12 +141,21 @@ const CustomerMenu = () => {
     
     const fetchData = async () => {
       try {
-        const [tableRes, menuRes] = await Promise.all([
-          axios.get(`/api/menu/table/${tableNumber}`),
-          axios.get('/api/menu')
+        const [tableRes, menuRes] = await Promise.allSettled([
+          axios.get(`/api/menu/table/${tableNumber}`, { timeout: 10000 }),
+          axios.get('/api/menu', { timeout: 10000 })
         ]);
-        setTable(tableRes.data);
-        setMenuItems(menuRes.data.items);
+
+        if (tableRes.status === 'fulfilled') {
+          setTable(tableRes.value.data);
+        }
+
+        if (menuRes.status === 'fulfilled') {
+          setMenuItems(menuRes.value.data.items || []);
+        } else {
+          setMenuItems([]);
+          setSessionError('Unable to load menu right now. Please refresh and try again.');
+        }
       } catch (err) {
         console.error('Failed to load data', err);
         if (err.response?.status === 401) {
@@ -148,6 +163,8 @@ const CustomerMenu = () => {
           sessionStorage.removeItem('tableToken');
           sessionStorage.removeItem('tableNumber');
           setSessionError('Your session has expired. Please scan the QR code again.');
+        } else {
+          setSessionError('Unable to load menu right now. Please refresh and try again.');
         }
       } finally {
         setLoading(false);
@@ -254,7 +271,7 @@ const CustomerMenu = () => {
   };
 
   const submitOrder = async () => {
-    if (!table || cart.length === 0 || !sessionToken) return;
+    if (cart.length === 0 || !sessionToken) return;
     setPlacingOrder(true);
     
     try {
@@ -290,7 +307,7 @@ const CustomerMenu = () => {
   if (sessionValidating) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-zinc-950 via-zinc-900 to-black flex flex-col items-center justify-center">
-        <div className="relative">
+        <div className="relative w-16 h-16 mx-auto">
           <div className="w-16 h-16 border-2 border-amber-500/30 rounded-full"></div>
           <div className="absolute inset-0 w-16 h-16 border-2 border-transparent border-t-amber-500 rounded-full animate-spin"></div>
         </div>
@@ -320,7 +337,7 @@ const CustomerMenu = () => {
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-zinc-950 via-zinc-900 to-black flex flex-col items-center justify-center">
-        <div className="relative">
+        <div className="relative w-16 h-16 mx-auto">
           <div className="w-16 h-16 border-2 border-amber-500/30 rounded-full"></div>
           <div className="absolute inset-0 w-16 h-16 border-2 border-transparent border-t-amber-500 rounded-full animate-spin"></div>
         </div>

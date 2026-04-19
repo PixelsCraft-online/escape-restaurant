@@ -6,7 +6,7 @@ const { tableAuth } = require('../middleware/tableAuth');
 // POST /api/bills — Generate bill for an order
 router.post('/bills', adminAuth, async (req, res) => {
   const { prisma, io } = req;
-  const { orderId, discount = 0, discountType = 'flat' } = req.body;
+  const { orderId, discount = 0, discountType = 'flat', includeGST = true } = req.body;
 
   if (!orderId) return res.status(400).json({ error: 'orderId required' });
 
@@ -39,7 +39,7 @@ router.post('/bills', adminAuth, async (req, res) => {
     }
 
     const taxableAmount = subtotal - discountAmount;
-    const tax = parseFloat((taxableAmount * 0.05).toFixed(2));
+    const tax = includeGST ? parseFloat((taxableAmount * 0.05).toFixed(2)) : 0;
     const total = parseFloat((taxableAmount + tax).toFixed(2));
 
     const bill = await prisma.bill.create({
@@ -144,7 +144,6 @@ router.get('/bills', adminAuth, async (req, res) => {
 });
 
 // GET /api/bills/table/:tableId — Get bills for a specific table (protected by table token)
-// Only returns bills created during the current session
 router.get('/bills/table/:tableId', tableAuth, async (req, res) => {
   const { prisma } = req;
   const tableId = parseInt(req.params.tableId);
@@ -155,13 +154,16 @@ router.get('/bills/table/:tableId', tableAuth, async (req, res) => {
   }
 
   try {
-    // Only show bills from current session
+    // Keep unpaid bills visible even if the table session token has been refreshed.
     const sessionStartTime = req.tableSession.createdAt;
 
     const bills = await prisma.bill.findMany({
       where: { 
         tableId,
-        createdAt: { gte: sessionStartTime }
+        OR: [
+          { isPaid: false },
+          { createdAt: { gte: sessionStartTime } }
+        ]
       },
       include: {
         order: { include: { items: { include: { menuItem: true } }, table: true } },

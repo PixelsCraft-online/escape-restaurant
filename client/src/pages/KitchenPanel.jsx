@@ -46,12 +46,19 @@ const KitchenPanel = () => {
   const [pin, setPin] = useState('');
   const [isAuthenticated, setIsAuthenticated] = useState(false);
   const [orders, setOrders] = useState([]);
-  const [soundEnabled, setSoundEnabled] = useState(false);
+  const [waiterAlerts, setWaiterAlerts] = useState([]);
+  const [focusedTable, setFocusedTable] = useState(null);
+  const [soundEnabled, setSoundEnabled] = useState(true);
   const [loading, setLoading] = useState(false);
   const [view, setView] = useState('grid'); // grid | list
+  const [fetchError, setFetchError] = useState('');
   
   const audioCtxRef = useRef(null);
+  const tableFocusTimeoutRef = useRef(null);
+  const hasLoadedOrdersRef = useRef(false);
   const socket = useSocket(isAuthenticated ? 'join_staff' : null, { pin });
+
+  const isKitchenOrder = (order) => ['PENDING', 'IN_PROGRESS', 'PARTIALLY_READY'].includes(order.status);
 
   const playBeep = () => {
     if (!soundEnabled) return;
@@ -77,6 +84,53 @@ const KitchenPanel = () => {
     }
   };
 
+  const playWaiterAlertSound = () => {
+    try {
+      if (!audioCtxRef.current) {
+        audioCtxRef.current = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      const ctx = audioCtxRef.current;
+      if (ctx.state === 'suspended') ctx.resume();
+
+      const beepAt = (time, frequency) => {
+        const osc = ctx.createOscillator();
+        const gainNode = ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(frequency, time);
+        gainNode.gain.setValueAtTime(0.001, time);
+        gainNode.gain.exponentialRampToValueAtTime(0.12, time + 0.02);
+        gainNode.gain.exponentialRampToValueAtTime(0.001, time + 0.14);
+        osc.connect(gainNode);
+        gainNode.connect(ctx.destination);
+        osc.start(time);
+        osc.stop(time + 0.14);
+      };
+
+      const start = ctx.currentTime;
+      beepAt(start, 720);
+      beepAt(start + 0.18, 880);
+    } catch (e) {
+      console.error('Waiter alert sound failed:', e);
+    }
+  };
+
+  const dismissWaiterAlert = (alertId) => {
+    setWaiterAlerts(prev => prev.filter(a => a.id !== alertId));
+  };
+
+  const focusTableCard = (tableNumber) => {
+    setFocusedTable(tableNumber);
+    if (tableFocusTimeoutRef.current) {
+      clearTimeout(tableFocusTimeoutRef.current);
+    }
+    tableFocusTimeoutRef.current = setTimeout(() => setFocusedTable(null), 2500);
+
+    const card = document.querySelector(`[data-table-number="${tableNumber}"]`);
+    if (card) {
+      card.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' });
+    }
+  };
+
   const handleLogin = (e) => {
     e.preventDefault();
     if (pin === import.meta.env.VITE_ADMIN_PIN) setIsAuthenticated(true);
@@ -88,23 +142,82 @@ const KitchenPanel = () => {
     setLoading(true);
     const fetchActiveOrders = async () => {
       try {
-        const res = await axios.get('/api/orders', { headers: { 'x-admin-pin': pin } });
-        const kitchenOrders = res.data.filter(o => ['PENDING', 'IN_PROGRESS', 'PARTIALLY_READY'].includes(o.status));
-        setOrders(kitchenOrders);
+        const res = await axios.get('/api/orders', {
+          headers: { 'x-admin-pin': pin },
+          timeout: 10000,
+        });
+        const kitchenOrders = res.data.filter(isKitchenOrder);
+        setOrders(prev => {
+          // Avoid alerting on first load; play sound only for new/expanded orders afterward.
+          if (hasLoadedOrdersRef.current) {
+            const prevMap = new Map(prev.map(o => [o.id, o]));
+            const hasNewOrExpandedOrder = kitchenOrders.some(nextOrder => {
+              const prevOrder = prevMap.get(nextOrder.id);
+              if (!prevOrder) return true;
+              return (nextOrder.items?.length || 0) > (prevOrder.items?.length || 0);
+            });
+            if (hasNewOrExpandedOrder) playBeep();
+          } else {
+            hasLoadedOrdersRef.current = true;
+          }
+          return kitchenOrders;
+        });
+        setFetchError('');
       } catch (err) {
         console.error('Failed to fetch orders', err);
         if (err.response?.status === 401) setIsAuthenticated(false);
+        if (err.response?.status === 429) {
+          setFetchError('Too many requests. Retrying automatically...');
+        } else if (!err.response) {
+          setFetchError('Network issue while loading orders. Retrying automatically...');
+        } else {
+          setFetchError('Could not refresh orders right now. Retrying automatically...');
+        }
       } finally {
         setLoading(false);
       }
     };
+
     fetchActiveOrders();
+
+    // Poll as a fallback in case socket events are missed.
+    const interval = setInterval(fetchActiveOrders, 10000);
+    return () => clearInterval(interval);
   }, [isAuthenticated, pin]);
 
   useEffect(() => {
     if (!socket) return;
-    socket.on('new_order', (order) => { setOrders(prev => [...prev, order]); playBeep(); });
-    socket.on('order_updated', (updatedOrder) => { setOrders(prev => prev.map(o => o.id === updatedOrder.id ? updatedOrder : o)); });
+
+    const onWaiterCalled = (call) => {
+      setWaiterAlerts(prev => {
+        if (prev.some(a => a.id === call.id)) return prev;
+        const next = [{ id: call.id, tableNumber: call.tableNumber }, ...prev];
+        return next.slice(0, 4);
+      });
+      playWaiterAlertSound();
+    };
+
+    socket.on('new_order', (order) => {
+      if (!isKitchenOrder(order)) return;
+      setOrders(prev => prev.some(o => o.id === order.id) ? prev : [...prev, order]);
+      playBeep();
+    });
+    socket.on('order_updated', (updatedOrder) => {
+      setOrders(prev => {
+        if (!isKitchenOrder(updatedOrder)) {
+          return prev.filter(o => o.id !== updatedOrder.id);
+        }
+        const existingOrder = prev.find(o => o.id === updatedOrder.id);
+        const isNewOrder = !existingOrder;
+        const hasNewItems = existingOrder && (updatedOrder.items?.length || 0) > (existingOrder.items?.length || 0);
+        if (isNewOrder || hasNewItems) playBeep();
+
+        const exists = !!existingOrder;
+        return exists
+          ? prev.map(o => o.id === updatedOrder.id ? updatedOrder : o)
+          : [...prev, updatedOrder];
+      });
+    });
     socket.on('item_status_update', ({ orderItem }) => {
       setOrders(prev => prev.map(order => {
         if (order.id !== orderItem.orderId) return order;
@@ -113,8 +226,25 @@ const KitchenPanel = () => {
     });
     socket.on('order_completed', (completedOrder) => { setOrders(prev => prev.filter(o => o.id !== completedOrder.id)); });
     socket.on('bill_generated', (bill) => { setOrders(prev => prev.filter(o => o.id !== bill.orderId)); });
-    return () => { socket.off('new_order'); socket.off('order_updated'); socket.off('item_status_update'); socket.off('order_completed'); socket.off('bill_generated'); };
+    socket.on('waiter_called', onWaiterCalled);
+
+    return () => {
+      socket.off('new_order');
+      socket.off('order_updated');
+      socket.off('item_status_update');
+      socket.off('order_completed');
+      socket.off('bill_generated');
+      socket.off('waiter_called', onWaiterCalled);
+    };
   }, [socket, soundEnabled]);
+
+  useEffect(() => {
+    return () => {
+      if (tableFocusTimeoutRef.current) {
+        clearTimeout(tableFocusTimeoutRef.current);
+      }
+    };
+  }, []);
 
   const handleItemAction = async (orderItemId, action) => {
     try {
@@ -217,7 +347,7 @@ const KitchenPanel = () => {
   }
 
   const pendingItems = orders.flatMap(o => o.items.filter(i => i.itemStatus === 'PENDING'));
-  const inProgressItems = orders.flatMap(o => o.items.filter(i => i.itemStatus === 'IN_PROGRESS'));
+  const inProgressItems = orders.flatMap(o => o.items.filter(i => i.itemStatus === 'PREPARING'));
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
@@ -319,8 +449,51 @@ const KitchenPanel = () => {
         </div>
       </motion.header>
 
+      <div className="fixed top-24 right-4 z-[60] space-y-2 pointer-events-none">
+        <AnimatePresence>
+          {waiterAlerts.map((alert) => (
+            <motion.div
+              key={alert.id}
+              initial={{ opacity: 0, y: -10, x: 20 }}
+              animate={{ opacity: 1, y: 0, x: 0 }}
+              exit={{ opacity: 0, y: -8, x: 20 }}
+              className="pointer-events-auto bg-cyan-500/15 border border-cyan-400/30 backdrop-blur-xl rounded-xl px-4 py-3 min-w-[280px] shadow-lg shadow-cyan-500/15"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <p className="text-cyan-300 text-xs font-semibold uppercase tracking-wider">Waiter Call</p>
+                  <p className="text-white font-bold">Send the Waiter To Table {alert.tableNumber}</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => dismissWaiterAlert(alert.id)}
+                  className="w-7 h-7 rounded-lg bg-slate-900/50 border border-white/10 text-slate-300 hover:text-white hover:bg-slate-800/70 transition-colors"
+                  aria-label="Close waiter alert"
+                >
+                  x
+                </button>
+              </div>
+              <div className="mt-3 flex justify-end">
+                <button
+                  type="button"
+                  onClick={() => focusTableCard(alert.tableNumber)}
+                  className="px-3 py-1.5 rounded-lg bg-cyan-500 hover:bg-cyan-400 text-slate-950 text-sm font-semibold transition-colors"
+                >
+                  View Table
+                </button>
+              </div>
+            </motion.div>
+          ))}
+        </AnimatePresence>
+      </div>
+
       {/* Main Content */}
-      <main className="p-6 max-w-[2000px] mx-auto">
+      <main className="p-6 max-w-[2000px] mx-auto h-[calc(100vh-96px)] overflow-y-auto">
+        {fetchError && (
+          <div className="mb-4 px-4 py-3 rounded-xl border border-amber-500/30 bg-amber-500/10 text-amber-300 text-sm">
+            {fetchError}
+          </div>
+        )}
         {loading ? (
           <div className="flex items-center justify-center h-[70vh]">
             <motion.div 
@@ -368,15 +541,18 @@ const KitchenPanel = () => {
                     variants={cardVariants}
                     exit="exit"
                     layout
+                    data-table-number={order.table.tableNumber}
                     className={`relative bg-gradient-to-br ${urgency.bg} backdrop-blur-xl rounded-2xl border overflow-hidden ${
                       urgency.level === 'critical' ? 'border-red-500/30' : 
                       urgency.level === 'warning' ? 'border-amber-500/30' : 'border-slate-700/50'
+                    } ${
+                      focusedTable === order.table.tableNumber ? 'ring-2 ring-cyan-400/70' : ''
                     }`}
                   >
                     {/* Urgency pulse for critical */}
                     {urgency.level === 'critical' && (
                       <motion.div 
-                        className="absolute inset-0 bg-red-500/5 rounded-2xl"
+                        className="pointer-events-none absolute inset-0 bg-red-500/5 rounded-2xl"
                         variants={pulseVariants}
                         animate="pulse"
                       />
@@ -432,7 +608,10 @@ const KitchenPanel = () => {
                     </div>
 
                     {/* Items List */}
-                    <div className="p-4 space-y-2 max-h-[300px] overflow-y-auto">
+                    <div
+                      className="p-4 space-y-2 max-h-[300px] overflow-y-auto overscroll-contain"
+                      style={{ WebkitOverflowScrolling: 'touch', touchAction: 'pan-y' }}
+                    >
                       <AnimatePresence>
                         {order.items.map(item => {
                           const isDone = item.itemStatus === 'DONE';
@@ -464,8 +643,8 @@ const KitchenPanel = () => {
                                     <p className={`font-bold truncate ${isDone ? 'text-emerald-400 line-through' : isSkipped ? 'text-slate-500 line-through' : 'text-white'}`}>
                                       {item.menuItem.name}
                                     </p>
-                                    {item.notes && (
-                                      <p className="text-xs text-amber-400 truncate">📝 {item.notes}</p>
+                                    {item.instructions && (
+                                      <p className="text-xs text-amber-400 truncate">📝 {item.instructions}</p>
                                     )}
                                   </div>
                                 </div>

@@ -1,10 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { useSearchParams, useNavigate } from 'react-router-dom';
 import axios from 'axios';
 import { useSocket } from '../socket/useSocket';
 import StatusBadge from '../components/StatusBadge';
 import Timer from '../components/Timer';
 import PremiumLogo from '../components/PremiumLogo';
+
+const REQUEST_TIMEOUT_MS = 10000;
 
 const TrackOrder = () => {
   const [searchParams] = useSearchParams();
@@ -26,6 +28,8 @@ const TrackOrder = () => {
   const [requestingBill, setRequestingBill] = useState(false);
   const [billRequested, setBillRequested] = useState(false);
 
+  const activeOrders = orders.filter(o => o.status !== 'BILLED');
+
   // Validate session on mount
   useEffect(() => {
     const initSession = async () => {
@@ -37,11 +41,13 @@ const TrackOrder = () => {
 
         if (tokenToValidate) {
           try {
-            const res = await axios.get(`/api/session/validate/${tokenToValidate}`);
+            const res = await axios.get(`/api/session/validate/${tokenToValidate}`, {
+              timeout: REQUEST_TIMEOUT_MS,
+            });
             if (res.data.valid) {
               setSessionToken(tokenToValidate);
               setTableNumber(res.data.tableNumber);
-              setTableId(res.data.tableId || storedTableId);
+              setTableId(res.data.tableId || (storedTableId ? parseInt(storedTableId) : null));
               sessionStorage.setItem('tableToken', tokenToValidate);
               sessionStorage.setItem('tableNumber', res.data.tableNumber);
               if (res.data.tableId) {
@@ -54,12 +60,29 @@ const TrackOrder = () => {
               setSessionValidating(false);
               return;
             }
+
+            // Token explicitly invalid.
+            sessionStorage.removeItem('tableToken');
+            sessionStorage.removeItem('tableNumber');
+            sessionStorage.removeItem('tableId');
           } catch (validationErr) {
-            console.log('Token validation failed, trying to create new session');
+            console.error('Token validation request failed:', validationErr);
+
+            // If network/timeout occurs but we still have stored context, continue with it
+            // so users can still view active orders from the same table session.
+            if (
+              storedToken &&
+              storedToken === tokenToValidate &&
+              storedTableNumber &&
+              storedTableId
+            ) {
+              setSessionToken(tokenToValidate);
+              setTableNumber(parseInt(storedTableNumber));
+              setTableId(parseInt(storedTableId));
+              setSessionValidating(false);
+              return;
+            }
           }
-          
-          // Token invalid - clear it and try to create new session
-          sessionStorage.removeItem('tableToken');
         }
 
         // Try to create new session with stored table number
@@ -67,6 +90,8 @@ const TrackOrder = () => {
           try {
             const res = await axios.post('/api/session/start', {
               tableNumber: parseInt(storedTableNumber)
+            }, {
+              timeout: REQUEST_TIMEOUT_MS,
             });
             
             setSessionToken(res.data.token);
@@ -112,7 +137,7 @@ const TrackOrder = () => {
 
   const socket = useSocket('join_table', { tableNumber });
 
-  const fetchOrders = async () => {
+  const fetchOrders = useCallback(async () => {
     if (!tableId) return;
     try {
       const [orderRes, billRes] = await Promise.all([
@@ -131,14 +156,24 @@ const TrackOrder = () => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [tableId]);
 
   useEffect(() => {
     if (tableId && !sessionValidating) fetchOrders();
-  }, [tableId, sessionValidating]);
+  }, [tableId, sessionValidating, fetchOrders]);
+
+  useEffect(() => {
+    if (!tableId || sessionValidating || sessionError) return;
+    const interval = setInterval(fetchOrders, 5000);
+    return () => clearInterval(interval);
+  }, [tableId, sessionValidating, sessionError, fetchOrders]);
 
   useEffect(() => {
     if (!socket) return;
+
+    const handleConnect = () => {
+      fetchOrders();
+    };
 
     socket.on('item_status_update', ({ orderItem }) => {
       setOrders(prev => prev.map(order => {
@@ -178,6 +213,11 @@ const TrackOrder = () => {
       fetchOrders();
     });
 
+    socket.on('bill_request_received', () => {
+      setRequestingBill(false);
+      setBillRequested(true);
+    });
+
     socket.on('bill_paid', (bill) => {
       // Update the bill in the list
       setBills(prev => prev.map(b => b.id === bill.id ? bill : b));
@@ -187,32 +227,53 @@ const TrackOrder = () => {
       sessionStorage.removeItem('tableToken');
       sessionStorage.removeItem('tableNumber');
       sessionStorage.removeItem('tableId');
+      setCallingWaiter(false);
+      setWaiterCalled(false);
+      setRequestingBill(false);
+      setBillRequested(false);
       alert(message || 'Thank you for dining with us!');
       setSessionError('Your session has ended. Scan the QR code for a new visit!');
     });
 
+    socket.on('waiter_call_received', () => {
+      setCallingWaiter(false);
+      setWaiterCalled(true);
+    });
+
     socket.on('waiter_acknowledged', () => {
+      setCallingWaiter(false);
       setWaiterCalled(false);
     });
+
+    socket.on('connect', handleConnect);
 
     return () => {
       socket.off('item_status_update');
       socket.off('order_completed');
       socket.off('order_updated');
       socket.off('bill_generated');
+      socket.off('bill_request_received');
       socket.off('bill_paid');
       socket.off('session_ended');
+      socket.off('waiter_call_received');
       socket.off('waiter_acknowledged');
+      socket.off('connect', handleConnect);
     };
-  }, [socket]);
+  }, [socket, fetchOrders]);
 
   const callWaiter = async () => {
-    if (!socket || callingWaiter || !tableId) return;
+    if (!socket || !socket.connected || callingWaiter || waiterCalled || !tableId) return;
     setCallingWaiter(true);
     try {
-      socket.emit('call_waiter', { tableId, tableNumber });
-      setWaiterCalled(true);
-      setTimeout(() => setCallingWaiter(false), 1000);
+      socket.emit('call_waiter', { tableId, tableNumber }, (ack) => {
+        if (ack?.ok) {
+          setWaiterCalled(true);
+        } else {
+          setWaiterCalled(false);
+          alert(ack?.error || 'Failed to call waiter. Please try again.');
+        }
+        setCallingWaiter(false);
+      });
     } catch (err) {
       console.error('Failed to call waiter:', err);
       setCallingWaiter(false);
@@ -220,16 +281,22 @@ const TrackOrder = () => {
   };
 
   const requestBill = async () => {
-    if (!socket || requestingBill || !tableId) return;
+    if (!socket || !socket.connected || requestingBill || billRequested || !tableId || activeOrders.length === 0) return;
     setRequestingBill(true);
     try {
       socket.emit('request_bill', { 
         tableId, 
         tableNumber,
         orderIds: activeOrders.map(o => o.id)
+      }, (ack) => {
+        if (ack?.ok) {
+          setBillRequested(true);
+        } else {
+          setBillRequested(false);
+          alert(ack?.error || 'Failed to request bill. Please try again.');
+        }
+        setRequestingBill(false);
       });
-      setBillRequested(true);
-      setTimeout(() => setRequestingBill(false), 1000);
     } catch (err) {
       console.error('Failed to request bill:', err);
       setRequestingBill(false);
@@ -241,7 +308,7 @@ const TrackOrder = () => {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-zinc-950 via-zinc-900 to-black">
         <div className="text-center">
-          <div className="relative">
+          <div className="relative w-16 h-16 mx-auto">
             <div className="w-16 h-16 border-2 border-amber-500/30 rounded-full"></div>
             <div className="absolute inset-0 w-16 h-16 border-2 border-transparent border-t-amber-500 rounded-full animate-spin"></div>
           </div>
@@ -290,7 +357,7 @@ const TrackOrder = () => {
     return (
       <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-zinc-950 via-zinc-900 to-black">
         <div className="text-center">
-          <div className="relative">
+          <div className="relative w-16 h-16 mx-auto">
             <div className="w-16 h-16 border-2 border-amber-500/30 rounded-full"></div>
             <div className="absolute inset-0 w-16 h-16 border-2 border-transparent border-t-amber-500 rounded-full animate-spin"></div>
           </div>
@@ -300,21 +367,28 @@ const TrackOrder = () => {
     );
   }
 
-  const activeOrders = orders.filter(o => o.status !== 'BILLED');
-
   const getProgress = () => {
     if (activeOrders.length === 0) return { step: 0, text: '', percent: 0 };
+
     const allItems = activeOrders.flatMap(o => o.items);
-    const doneItems = allItems.filter(i => i.itemStatus === 'DONE').length;
     const totalItems = allItems.length;
+    if (totalItems === 0) return { step: 1, text: 'Order received', percent: 33 };
+
+    const terminalStatuses = ['DONE', 'SKIPPED', 'OUT_OF_STOCK'];
+    const doneItems = allItems.filter(i => i.itemStatus === 'DONE').length;
+    const finishedItems = allItems.filter(i => terminalStatuses.includes(i.itemStatus)).length;
     const preparingItems = allItems.filter(i => i.itemStatus === 'PREPARING').length;
+    const hasActivePreparation = activeOrders.some(o => ['IN_PROGRESS', 'PARTIALLY_READY', 'COMPLETED'].includes(o.status));
     
-    if (doneItems === totalItems) {
+    if (finishedItems === totalItems) {
       return { step: 3, text: 'Ready to serve', percent: 100 };
     }
-    if (preparingItems > 0 || doneItems > 0) {
-      return { step: 2, text: `Preparing (${doneItems}/${totalItems} ready)`, percent: 33 + (doneItems / totalItems) * 34 };
+
+    if (preparingItems > 0 || finishedItems > 0 || hasActivePreparation) {
+      const progressPercent = Math.max(33, Math.min(95, Math.round((finishedItems / totalItems) * 100)));
+      return { step: 2, text: `Preparing (${doneItems}/${totalItems} ready)`, percent: progressPercent };
     }
+
     return { step: 1, text: 'Order received', percent: 33 };
   };
 

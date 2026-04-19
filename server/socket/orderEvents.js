@@ -136,14 +136,21 @@ function registerSocketEvents(io, prisma) {
         const allItems = await prisma.orderItem.findMany({ where: { orderId: orderItem.orderId } });
         const terminal = ['DONE', 'SKIPPED', 'OUT_OF_STOCK'];
         const allFinished = allItems.every((i) => terminal.includes(i.itemStatus));
+        const allDone = allItems.every((i) => i.itemStatus === 'DONE');
 
-        if (allFinished) {
-          const allDone = allItems.every((i) => i.itemStatus === 'DONE');
-          await prisma.order.update({
-            where: { id: orderItem.orderId },
-            data: { status: allDone ? 'COMPLETED' : 'PARTIALLY_READY' },
-          });
-        }
+        const nextStatus = allFinished
+          ? (allDone ? 'COMPLETED' : 'PARTIALLY_READY')
+          : 'IN_PROGRESS';
+
+        const updatedOrder = await prisma.order.update({
+          where: { id: orderItem.orderId },
+          data: { status: nextStatus },
+          include: { items: { include: { menuItem: true } }, table: true },
+        });
+
+        io.to('staff').emit('order_updated', updatedOrder);
+        io.to('admin').emit('order_updated', updatedOrder);
+        io.to(`table_${tableNumber}`).emit('order_updated', updatedOrder);
       } catch (err) {
         console.error('item_action error:', err);
       }
@@ -167,7 +174,7 @@ function registerSocketEvents(io, prisma) {
     });
 
     // Generate bill via socket
-    socket.on('generate_bill', async ({ orderId, discount, discountType }) => {
+    socket.on('generate_bill', async ({ orderId, discount, discountType, includeGST = true }) => {
       if (!socket.data.isAdmin) return socket.emit('error', { message: 'Unauthorized' });
       try {
         const order = await prisma.order.findUnique({
@@ -186,7 +193,7 @@ function registerSocketEvents(io, prisma) {
         else discountAmount = discount || 0;
 
         const taxable = subtotal - discountAmount;
-        const tax = parseFloat((taxable * 0.05).toFixed(2));
+        const tax = includeGST ? parseFloat((taxable * 0.05).toFixed(2)) : 0;
         const total = parseFloat((taxable + tax).toFixed(2));
 
         const existing = await prisma.bill.findUnique({ where: { orderId } });
@@ -262,12 +269,28 @@ function registerSocketEvents(io, prisma) {
     });
 
     // Call waiter from customer
-    socket.on('call_waiter', async ({ tableId, tableNumber }) => {
+    socket.on('call_waiter', async ({ tableId, tableNumber }, callback) => {
       try {
-        const call = await prisma.waiterCall.create({
-          data: { tableId },
-          include: { table: true }
+        if (!tableId || !tableNumber) {
+          if (typeof callback === 'function') callback({ ok: false, error: 'Table details required' });
+          return;
+        }
+
+        const existingCall = await prisma.waiterCall.findFirst({
+          where: {
+            tableId,
+            isAttended: false,
+          },
+          orderBy: { createdAt: 'desc' },
         });
+
+        let call = existingCall;
+        if (!call) {
+          call = await prisma.waiterCall.create({
+            data: { tableId },
+            include: { table: true },
+          });
+        }
         
         io.to('staff').emit('waiter_called', { 
           id: call.id,
@@ -275,14 +298,20 @@ function registerSocketEvents(io, prisma) {
           tableId,
           createdAt: call.createdAt 
         });
+        io.to(`table_${tableNumber}`).emit('waiter_call_received', {
+          callId: call.id,
+          tableNumber,
+        });
+        if (typeof callback === 'function') callback({ ok: true, callId: call.id });
         console.log(`🙋 Waiter called for table ${tableNumber}`);
       } catch (err) {
         console.error('call_waiter error:', err);
+        if (typeof callback === 'function') callback({ ok: false, error: 'Failed to call waiter' });
       }
     });
 
     // Acknowledge waiter call from counter/staff
-    socket.on('acknowledge_waiter_call', async ({ callId, tableNumber }) => {
+    socket.on('acknowledge_waiter_call', async ({ callId, tableNumber }, callback) => {
       if (!socket.data.isAdmin) return socket.emit('error', { message: 'Unauthorized' });
       try {
         await prisma.waiterCall.update({
@@ -292,24 +321,37 @@ function registerSocketEvents(io, prisma) {
         
         io.to(`table_${tableNumber}`).emit('waiter_acknowledged');
         io.to('staff').emit('waiter_call_handled', { callId });
+        if (typeof callback === 'function') callback({ ok: true });
         console.log(`✅ Waiter call ${callId} acknowledged for table ${tableNumber}`);
       } catch (err) {
         console.error('acknowledge_waiter_call error:', err);
+        if (typeof callback === 'function') callback({ ok: false, error: 'Failed to acknowledge waiter call' });
       }
     });
 
     // Request bill from customer
-    socket.on('request_bill', async ({ tableId, tableNumber, orderIds }) => {
+    socket.on('request_bill', async ({ tableId, tableNumber, orderIds }, callback) => {
       try {
+        if (!tableId || !tableNumber || !Array.isArray(orderIds) || orderIds.length === 0) {
+          if (typeof callback === 'function') callback({ ok: false, error: 'Order details required' });
+          return;
+        }
+
         io.to('staff').emit('bill_requested', { 
           tableNumber, 
           tableId,
           orderIds,
           createdAt: new Date()
         });
+        io.to(`table_${tableNumber}`).emit('bill_request_received', {
+          tableNumber,
+          createdAt: new Date(),
+        });
+        if (typeof callback === 'function') callback({ ok: true });
         console.log(`💵 Bill requested for table ${tableNumber}`);
       } catch (err) {
         console.error('request_bill error:', err);
+        if (typeof callback === 'function') callback({ ok: false, error: 'Failed to request bill' });
       }
     });
 

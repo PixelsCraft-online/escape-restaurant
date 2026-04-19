@@ -71,6 +71,9 @@ router.post('/orders', tableAuth, async (req, res) => {
         },
       });
 
+      // Keep table occupancy in sync even when an old active order is reused.
+      await prisma.table.update({ where: { id: tableId }, data: { isOccupied: true } });
+
       // Emit update event
       io.to('staff').emit('order_updated', order);
       io.to('admin').emit('order_updated', order);
@@ -172,6 +175,9 @@ router.patch('/orders/:id/items', tableAuth, async (req, res) => {
       await prisma.order.update({ where: { id: orderId }, data: { status: 'IN_PROGRESS' } });
     }
 
+    // Ensure table remains marked occupied while active items are being added.
+    await prisma.table.update({ where: { id: tableId }, data: { isOccupied: true } });
+
     io.to('staff').emit('order_updated', updatedOrder);
     io.to('admin').emit('order_updated', updatedOrder);
     io.to(`table_${existingOrder.table.tableNumber}`).emit('order_updated', updatedOrder);
@@ -207,22 +213,24 @@ router.patch('/order-items/:id', adminAuth, async (req, res) => {
     io.to(`table_${tableNumber}`).emit('item_status_update', { orderItem });
     io.to('staff').emit('item_status_update', { orderItem });
 
-    // If all items in order are DONE/SKIPPED/OOS, check order status
+    // Keep order status in sync with item states
     const allItems = await prisma.orderItem.findMany({ where: { orderId: orderItem.orderId } });
-    const allFinished = allItems.every((i) =>
-      ['DONE', 'SKIPPED', 'OUT_OF_STOCK'].includes(i.itemStatus)
-    );
-    const someReady = allItems.some((i) => i.itemStatus === 'DONE');
+    const terminalStatuses = ['DONE', 'SKIPPED', 'OUT_OF_STOCK'];
+    const allFinished = allItems.every((i) => terminalStatuses.includes(i.itemStatus));
     const allDone = allItems.every((i) => i.itemStatus === 'DONE');
+    const newStatus = allFinished ? (allDone ? 'COMPLETED' : 'PARTIALLY_READY') : 'IN_PROGRESS';
+
+    const updatedOrder = await prisma.order.update({
+      where: { id: orderItem.orderId },
+      data: { status: newStatus },
+      include: { items: { include: { menuItem: true } }, table: true },
+    });
+
+    io.to(`table_${tableNumber}`).emit('order_updated', updatedOrder);
+    io.to('staff').emit('order_updated', updatedOrder);
+    io.to('admin').emit('order_updated', updatedOrder);
 
     if (allFinished) {
-      const newStatus = allDone ? 'COMPLETED' : 'PARTIALLY_READY';
-      const updatedOrder = await prisma.order.update({
-        where: { id: orderItem.orderId },
-        data: { status: newStatus },
-        include: { items: { include: { menuItem: true } }, table: true },
-      });
-      
       // Emit order status change to customer
       io.to(`table_${tableNumber}`).emit('order_completed', updatedOrder);
       io.to('staff').emit('order_completed', updatedOrder);
@@ -276,9 +284,8 @@ router.get('/orders', adminAuth, async (req, res) => {
   }
 });
 
-// GET /api/orders/table/:tableId — Get orders for a specific table (track page)
+// GET /api/orders/table/:tableId — Get active orders for a specific table (track page)
 // Protected by table token - verifies the token matches the requested table
-// Only returns orders created during the current session
 router.get('/orders/table/:tableId', tableAuth, async (req, res) => {
   const { prisma } = req;
   const tableId = parseInt(req.params.tableId);
@@ -289,14 +296,12 @@ router.get('/orders/table/:tableId', tableAuth, async (req, res) => {
   }
 
   try {
-    // Only show orders created during this session (after session started)
-    const sessionStartTime = req.tableSession.createdAt;
-    
+    // Show all active (not billed) orders for this table.
+    // This keeps tracking consistent even if a session token is refreshed mid-visit.
     const orders = await prisma.order.findMany({
       where: { 
         tableId, 
-        status: { notIn: ['BILLED'] },
-        createdAt: { gte: sessionStartTime } // Only orders from current session
+        status: { notIn: ['BILLED'] }
       },
       include: { items: { include: { menuItem: true } }, table: true },
       orderBy: { createdAt: 'desc' },

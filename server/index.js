@@ -35,9 +35,16 @@ app.use(express.json());
 // Rate Limiting
 const apiLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per `window` (here, per 15 minutes)
+  max: 500, // Keep protection for public traffic without throttling normal panel usage
   standardHeaders: true, 
   legacyHeaders: false, 
+  skip: (req) => {
+    const adminPin = req.headers['x-admin-pin'];
+    const tableToken = req.headers['x-table-token'];
+
+    // Do not rate limit authenticated admin or table-session requests.
+    return Boolean(adminPin || tableToken);
+  },
   message: { error: 'Too many requests, please try again later.' }
 });
 

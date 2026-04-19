@@ -5,9 +5,11 @@ import {
   PieChart, Pie, Cell, LineChart, Line, Legend, AreaChart, Area
 } from 'recharts';
 import { QRCodeSVG } from 'qrcode.react';
+import { useSocket } from '../socket/useSocket';
 
 const COLORS = ['#f97316', '#0ea5e9', '#22c55e', '#8b5cf6', '#f43f5e', '#eab308'];
 const CATEGORIES = ['STARTER', 'MAIN_VEG', 'MAIN_NONVEG', 'BREAD_RICE', 'DESSERT', 'BEVERAGE'];
+const REQUEST_TIMEOUT_MS = 10000;
 
 const AdminDashboard = () => {
   // Auth
@@ -21,6 +23,7 @@ const AdminDashboard = () => {
   const [data, setData] = useState(null);
   const [weekData, setWeekData] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [dashboardError, setDashboardError] = useState('');
   
   // Menu Management
   const [menuItems, setMenuItems] = useState([]);
@@ -56,6 +59,7 @@ const AdminDashboard = () => {
 
   const ADMIN_PIN = import.meta.env.VITE_ADMIN_PIN;
   const authHeaders = { 'x-admin-pin': ADMIN_PIN };
+  const socket = useSocket(isAuthenticated ? 'join_admin' : null, { pin: ADMIN_PIN });
 
   // Auth
   const handleLogin = (e) => {
@@ -70,16 +74,21 @@ const AdminDashboard = () => {
   // Fetch Dashboard Data
   const fetchDashboard = useCallback(async () => {
     setLoading(true);
+    setDashboardError('');
     try {
       const [analyticsRes, weekRes] = await Promise.all([
-        axios.get('/api/admin/analytics', { headers: authHeaders }),
-        axios.get('/api/admin/analytics/week', { headers: authHeaders })
+        axios.get('/api/admin/analytics', { headers: authHeaders, timeout: REQUEST_TIMEOUT_MS }),
+        axios.get('/api/admin/analytics/week', { headers: authHeaders, timeout: REQUEST_TIMEOUT_MS })
       ]);
       setData(analyticsRes.data);
       setWeekData(weekRes.data.reverse());
     } catch (err) {
       console.error(err);
       if (err.response?.status === 401) setIsAuthenticated(false);
+      const message = err.response?.status === 429
+        ? 'Too many requests. Please wait a few seconds and try again.'
+        : 'Failed to load dashboard data. Please retry.';
+      setDashboardError(message);
     } finally {
       setLoading(false);
     }
@@ -88,7 +97,7 @@ const AdminDashboard = () => {
   // Fetch Menu
   const fetchMenu = useCallback(async () => {
     try {
-      const res = await axios.get('/api/menu');
+      const res = await axios.get('/api/menu', { timeout: REQUEST_TIMEOUT_MS });
       setMenuItems(res.data.items);
     } catch (err) {
       console.error(err);
@@ -98,7 +107,7 @@ const AdminDashboard = () => {
   // Fetch Tables
   const fetchTables = useCallback(async () => {
     try {
-      const res = await axios.get('/api/admin/tables', { headers: authHeaders });
+      const res = await axios.get('/api/admin/tables', { headers: authHeaders, timeout: REQUEST_TIMEOUT_MS });
       setTables(res.data);
     } catch (err) {
       console.error(err);
@@ -115,7 +124,7 @@ const AdminDashboard = () => {
       if (orderFilters.tableNumber) params.append('tableNumber', orderFilters.tableNumber);
       if (orderFilters.search) params.append('search', orderFilters.search);
 
-      const res = await axios.get(`/api/admin/orders?${params}`, { headers: authHeaders });
+      const res = await axios.get(`/api/admin/orders?${params}`, { headers: authHeaders, timeout: REQUEST_TIMEOUT_MS });
       setOrders(res.data.orders);
       setOrderPagination(res.data.pagination);
     } catch (err) {
@@ -127,7 +136,7 @@ const AdminDashboard = () => {
   const fetchRangeAnalytics = useCallback(async () => {
     if (!dateRange.startDate || !dateRange.endDate) return;
     try {
-      const res = await axios.get(`/api/admin/analytics/range?startDate=${dateRange.startDate}&endDate=${dateRange.endDate}`, { headers: authHeaders });
+      const res = await axios.get(`/api/admin/analytics/range?startDate=${dateRange.startDate}&endDate=${dateRange.endDate}`, { headers: authHeaders, timeout: REQUEST_TIMEOUT_MS });
       setRangeAnalytics(res.data);
     } catch (err) {
       console.error(err);
@@ -151,6 +160,87 @@ const AdminDashboard = () => {
       fetchRangeAnalytics();
     }
   }, [isAuthenticated, activeTab, fetchDashboard, fetchMenu, fetchTables, fetchOrders, fetchRangeAnalytics]);
+
+  // Auto-refresh active admin tab so updates from any table remain visible.
+  useEffect(() => {
+    if (!isAuthenticated) return;
+
+    const interval = setInterval(() => {
+      if (activeTab === 'dashboard') {
+        fetchDashboard();
+      } else if (activeTab === 'tables') {
+        fetchTables();
+      } else if (activeTab === 'orders') {
+        fetchOrders(orderPagination.page || 1);
+      } else if (activeTab === 'analytics') {
+        fetchRangeAnalytics();
+      }
+    }, 10000);
+
+    return () => clearInterval(interval);
+  }, [
+    isAuthenticated,
+    activeTab,
+    fetchDashboard,
+    fetchTables,
+    fetchOrders,
+    fetchRangeAnalytics,
+    orderPagination.page,
+  ]);
+
+  useEffect(() => {
+    if (!socket || !isAuthenticated) return;
+
+    const refreshCurrentTab = () => {
+      if (activeTab === 'dashboard') {
+        fetchDashboard();
+        fetchTables();
+      } else if (activeTab === 'menu') {
+        fetchMenu();
+      } else if (activeTab === 'tables') {
+        fetchTables();
+      } else if (activeTab === 'orders') {
+        fetchOrders(orderPagination.page || 1);
+      } else if (activeTab === 'analytics') {
+        fetchRangeAnalytics();
+        fetchTables();
+      }
+    };
+
+    const onOrderEvent = () => refreshCurrentTab();
+    const onBillEvent = () => refreshCurrentTab();
+    const onMenuEvent = () => {
+      if (activeTab === 'menu' || activeTab === 'dashboard') {
+        fetchMenu();
+      }
+    };
+
+    socket.on('new_order', onOrderEvent);
+    socket.on('order_updated', onOrderEvent);
+    socket.on('order_completed', onOrderEvent);
+    socket.on('bill_generated', onBillEvent);
+    socket.on('bill_paid', onBillEvent);
+    socket.on('menu_item_toggled', onMenuEvent);
+
+    return () => {
+      socket.off('new_order', onOrderEvent);
+      socket.off('order_updated', onOrderEvent);
+      socket.off('order_completed', onOrderEvent);
+      socket.off('bill_generated', onBillEvent);
+      socket.off('bill_paid', onBillEvent);
+      socket.off('menu_item_toggled', onMenuEvent);
+    };
+  }, [
+    socket,
+    isAuthenticated,
+    activeTab,
+    fetchDashboard,
+    fetchMenu,
+    fetchTables,
+    fetchOrders,
+    fetchRangeAnalytics,
+    orderPagination.page,
+  ]);
 
   // Menu Actions
   const toggleMenuItem = async (id, currentStatus) => {
@@ -328,9 +418,29 @@ const AdminDashboard = () => {
         {/* DASHBOARD TAB */}
         {activeTab === 'dashboard' && (
           <>
-            {loading || !data ? (
+            {loading ? (
               <div className="flex items-center justify-center h-64">
                 <div className="w-8 h-8 border-4 border-orange-500 border-t-transparent rounded-full animate-spin"></div>
+              </div>
+            ) : dashboardError ? (
+              <div className="bg-white border border-red-200 rounded-xl p-6 text-center">
+                <p className="text-red-600 font-medium">{dashboardError}</p>
+                <button
+                  onClick={fetchDashboard}
+                  className="mt-4 px-4 py-2 bg-orange-500 text-white rounded-lg text-sm font-medium hover:bg-orange-600 transition"
+                >
+                  Retry
+                </button>
+              </div>
+            ) : !data ? (
+              <div className="bg-white border border-gray-200 rounded-xl p-6 text-center">
+                <p className="text-gray-600 font-medium">No dashboard data available.</p>
+                <button
+                  onClick={fetchDashboard}
+                  className="mt-4 px-4 py-2 bg-orange-500 text-white rounded-lg text-sm font-medium hover:bg-orange-600 transition"
+                >
+                  Refresh
+                </button>
               </div>
             ) : (
               <div className="space-y-6">

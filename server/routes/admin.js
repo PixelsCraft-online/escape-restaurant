@@ -482,7 +482,7 @@ router.get('/orders', adminAuth, async (req, res) => {
 
     // Table filter
     if (tableNumber) {
-      where.table = { tableNumber: parseInt(tableNumber) };
+      where.table = { is: { tableNumber: parseInt(tableNumber) } };
     }
 
     // Search by item name
